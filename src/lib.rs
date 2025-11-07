@@ -131,14 +131,14 @@ impl Netrc {
                 Err(Error::EOF) => break,
                 Err(err) => return Err(err),
                 Ok(tok) => {
-                    netrc.parse_entry::<T>(&mut lexer, &tok, &mut count, unknown_entries)?;
+                    netrc.parse_entry(&mut lexer, &tok, &mut count, unknown_entries)?;
                 }
             }
         }
         Ok(netrc)
     }
 
-    fn parse_entry<T: AsRef<str>>(
+    fn parse_entry(
         &mut self,
         lexer: &mut Lexer,
         item: &Token,
@@ -313,13 +313,31 @@ impl<'a> Tokens<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        for ch in self.buf.clone() {
-            if !ch.is_whitespace() {
-                break;
+        loop {
+            // Skip whitespace characters
+            while let Some(ch) = self.buf.clone().next() {
+                if !ch.is_whitespace() {
+                    break;
+                }
+                self.update_position(ch);
+                self.buf.next();
             }
 
-            self.update_position(ch);
-            self.buf.next();
+            // Check if we're at a comment line (starting with #)
+            if let Some('#') = self.buf.clone().next() {
+                // Skip the entire comment line
+                while let Some(ch) = self.buf.clone().next() {
+                    self.update_position(ch);
+                    self.buf.next();
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+                // Continue the outer loop to skip any whitespace after the comment
+            } else {
+                // Not at a comment, we're done
+                break;
+            }
         }
     }
 
@@ -520,5 +538,121 @@ machine host2.com login login2"#
             Error::IllegalFormat(_pos, _s) => {}
             e => panic!("Error type: {}", e),
         }
+    }
+
+    #[test]
+    fn parse_with_comments() {
+        let input = r#"# This is a comment
+machine example.com login test password p@ssw0rd
+# Another comment
+machine host2.com login user2 password pass2"#
+            .to_string();
+        let netrc = Netrc::parse(input, false).unwrap();
+        assert_eq!(netrc.machines.len(), 2);
+
+        let machine = netrc.machines[0].clone();
+        assert_eq!(machine.name, Some("example.com".into()));
+        assert_eq!(machine.login, Some("test".into()));
+        assert_eq!(machine.password, Some("p@ssw0rd".into()));
+
+        let machine = netrc.machines[1].clone();
+        assert_eq!(machine.name, Some("host2.com".into()));
+        assert_eq!(machine.login, Some("user2".into()));
+        assert_eq!(machine.password, Some("pass2".into()));
+    }
+
+    #[test]
+    fn parse_with_inline_comments() {
+        let input = r#"
+# Comment at the beginning
+machine example.com login test password foo
+# Comment in the middle
+default login def password bar
+# Comment at the end
+"#
+        .to_string();
+        let netrc = Netrc::parse(input, false).unwrap();
+        assert_eq!(netrc.machines.len(), 2);
+
+        let machine = netrc.machines[0].clone();
+        assert_eq!(machine.name, Some("example.com".into()));
+        assert_eq!(machine.login, Some("test".into()));
+        assert_eq!(machine.password, Some("foo".into()));
+
+        let machine = netrc.machines[1].clone();
+        assert_eq!(machine.name, None);
+        assert_eq!(machine.login, Some("def".into()));
+        assert_eq!(machine.password, Some("bar".into()));
+    }
+
+    #[test]
+    fn parse_with_multiple_consecutive_comments() {
+        let input = r#"
+# First comment
+# Second comment
+# Third comment
+machine example.com login test password secret
+"#
+        .to_string();
+        let netrc = Netrc::parse(input, false).unwrap();
+        assert_eq!(netrc.machines.len(), 1);
+
+        let machine = netrc.machines[0].clone();
+        assert_eq!(machine.name, Some("example.com".into()));
+        assert_eq!(machine.login, Some("test".into()));
+        assert_eq!(machine.password, Some("secret".into()));
+    }
+
+    #[test]
+    fn parse_with_comments_and_macdef() {
+        let input = r#"
+# Comment before machine
+machine host0.com login login0
+# Comment before macdef
+macdef uploadtest
+cd /pub/tests
+bin
+quit
+
+# Comment after macdef
+machine host1.com login login1
+"#;
+        let netrc = Netrc::parse(input, false).unwrap();
+        assert_eq!(netrc.machines.len(), 2);
+        assert_eq!(netrc.macdefs.len(), 1);
+
+        let machine = netrc.machines[0].clone();
+        assert_eq!(machine.name, Some("host0.com".into()));
+        assert_eq!(machine.login, Some("login0".into()));
+
+        let machine = netrc.machines[1].clone();
+        assert_eq!(machine.name, Some("host1.com".into()));
+        assert_eq!(machine.login, Some("login1".into()));
+
+        let (ref name, ref cmds) = netrc.macdefs[0];
+        assert_eq!(name, "uploadtest");
+        assert_eq!(*cmds, vec!["cd /pub/tests", "bin", "quit"]);
+    }
+
+    #[test]
+    fn parse_empty_lines_and_comments() {
+        let input = r#"
+
+# Comment with empty lines around it
+
+machine example.com login test
+
+# Another comment
+
+password secret
+
+"#;
+        let netrc = Netrc::parse(input, false).unwrap();
+        assert_eq!(netrc.machines.len(), 1);
+
+        let machine = netrc.machines[0].clone();
+        assert_eq!(machine.name, Some("example.com".into()));
+        assert_eq!(machine.login, Some("test".into()));
+        assert_eq!(machine.password, Some("secret".into()));
     }
 }
